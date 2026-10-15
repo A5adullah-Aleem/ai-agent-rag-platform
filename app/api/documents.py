@@ -1,7 +1,8 @@
 
 from pathlib import Path
 from uuid import uuid4
-
+from app.models.document_chunk import DocumentChunk
+from app.services.chunker import chunk_text
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 from app.services.text_extractor import extract_text
@@ -182,16 +183,14 @@ def delete_document(
     
     
     
-@router.post(
-    "/{organization_id}/documents/{document_id}/process"
-)
+@router.post("/{organization_id}/documents/{document_id}/process")
 def process_document(
     organization_id: int,
     document_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    # Verify organization membership
+    # 1. Verify organization membership
     membership = db.query(Membership).filter(
         Membership.user_id == current_user.id,
         Membership.organization_id == organization_id,
@@ -203,7 +202,7 @@ def process_document(
             detail="You are not a member of this organization",
         )
 
-    # Find the document within this organization
+    # 2. Find document inside this organization
     document = db.query(Document).filter(
         Document.id == document_id,
         Document.organization_id == organization_id,
@@ -216,9 +215,31 @@ def process_document(
         )
 
     try:
+        # 3. Extract text and create chunks
         text = extract_text(document.file_path)
+        chunks = chunk_text(text)
 
+        if not chunks:
+            raise ValueError("No chunks generated from document")
+
+        # 4. Remove old chunks if document is processed again
+        db.query(DocumentChunk).filter(
+            DocumentChunk.document_id == document.id
+        ).delete(synchronize_session=False)
+
+        # 5. Save new chunks
+        for index, content in enumerate(chunks):
+            db.add(
+                DocumentChunk(
+                    document_id=document.id,
+                    chunk_index=index,
+                    content=content,
+                )
+            )
+
+        # 6. Update document status
         document.status = "processed"
+
         db.commit()
 
         return {
@@ -226,16 +247,12 @@ def process_document(
             "document_id": document.id,
             "status": document.status,
             "characters_extracted": len(text),
-            "text_preview": text[:500],
+            "total_chunks": len(chunks),
         }
 
     except ValueError as exc:
-        document.status = "failed"
-        db.commit()
-        raise HTTPException(
-            status_code=422,
-            detail=str(exc),
-        )
+        db.rollback()
+        raise HTTPException(status_code=422, detail=str(exc))
 
     except Exception:
         db.rollback()
