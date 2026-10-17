@@ -1,8 +1,7 @@
 from datetime import datetime
-
+from pgvector.sqlalchemy import Vector
 from sqlalchemy import DateTime, ForeignKey, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
-
 from app.db.base import Base
 
 
@@ -23,6 +22,17 @@ class DocumentChunk(Base):
         ForeignKey("documents.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
+    )
+    
+    
+    embedding: Mapped[list[float] | None] = mapped_column(
+    Vector(384),
+    nullable=True,
+    )
+    
+    section_title: Mapped[str | None] = mapped_column(
+    String(150),
+    nullable=True,
     )
 
     chunk_index: Mapped[int] = mapped_column(nullable=False)

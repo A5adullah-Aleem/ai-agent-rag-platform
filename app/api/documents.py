@@ -12,6 +12,9 @@ from app.api.dependencies import get_current_user
 from app.models.user import User
 from app.schemas.document import DocumentResponse
 from app.models.membership import Membership
+from app.services.embedding_service import generate_embedding
+from app.schemas.document import SearchRequest
+from app.services.semantic_search import semantic_search
 
 router = APIRouter(prefix="/organizations", tags=["Documents"])
 
@@ -216,26 +219,37 @@ def process_document(
 
     try:
         # 3. Extract text and create chunks
-        text = extract_text(document.file_path)
-        chunks = chunk_text(text)
+        blocks = extract_text(document.file_path)
+        chunks = chunk_text(blocks)
 
         if not chunks:
             raise ValueError("No chunks generated from document")
 
-        # 4. Remove old chunks if document is processed again
+        # 4. Generate embeddings for all chunks
+        chunk_records = []
+
+        for index, chunk in enumerate(chunks):
+            content = chunk["content"]
+            section_title = chunk["section_title"]
+
+            embedding = generate_embedding(content)
+
+            chunk_records.append(
+            DocumentChunk(
+            document_id=document.id,
+            chunk_index=index,
+            content=content,
+            section_title=section_title,
+            embedding=embedding,
+            )
+        )
+
+        # 5. Replace previous chunks
         db.query(DocumentChunk).filter(
             DocumentChunk.document_id == document.id
         ).delete(synchronize_session=False)
 
-        # 5. Save new chunks
-        for index, content in enumerate(chunks):
-            db.add(
-                DocumentChunk(
-                    document_id=document.id,
-                    chunk_index=index,
-                    content=content,
-                )
-            )
+        db.add_all(chunk_records)
 
         # 6. Update document status
         document.status = "processed"
@@ -246,8 +260,9 @@ def process_document(
             "message": "Document processed successfully",
             "document_id": document.id,
             "status": document.status,
-            "characters_extracted": len(text),
+            "characters_extracted":  sum(len(block["text"]) for block in blocks),
             "total_chunks": len(chunks),
+            "embeddings_generated": len(chunk_records),
         }
 
     except ValueError as exc:
@@ -260,3 +275,40 @@ def process_document(
             status_code=500,
             detail="Document processing failed",
         )
+
+
+
+
+
+@router.post("/{organization_id}/search")
+def search_organization_documents(
+    organization_id: int,
+    request: SearchRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    # Verify organization membership
+    membership = db.query(Membership).filter(
+        Membership.user_id == current_user.id,
+        Membership.organization_id == organization_id,
+    ).first()
+
+    if membership is None:
+        raise HTTPException(
+            status_code=403,
+            detail="You are not a member of this organization",
+        )
+
+    # Search the organization's document chunks
+    results = semantic_search(
+        db=db,
+        organization_id=organization_id,
+        query=request.query,
+        top_k=request.top_k,
+    )
+
+    return {
+        "query": request.query,
+        "total_results": len(results),
+        "results": results,
+    }
