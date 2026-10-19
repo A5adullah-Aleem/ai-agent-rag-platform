@@ -19,6 +19,10 @@ def _is_heading(
 ) -> bool:
     """Detect likely headings using document structure and formatting."""
 
+    # Table rows must never be treated as section headings.
+    if block.get("is_table"):
+        return False
+
     text = block["text"].strip()
 
     if not text or len(text) > 120:
@@ -27,15 +31,12 @@ def _is_heading(
     source = block.get("source")
     style = (block.get("style") or "").strip().lower()
 
-    # 1. DOCX: use paragraph styles.
     if source == "docx":
         if re.fullmatch(r"heading\s+\d+", style):
             return True
-
         if style == "subtitle":
             return True
 
-    # Avoid treating complete sentences as headings.
     if text.endswith((".", "?", "!", ";")):
         return False
 
@@ -44,36 +45,27 @@ def _is_heading(
     if len(words) > 12:
         return False
 
-    # 2. Numbered headings: e.g. "2.1 System Design".
     if NUMBERED_HEADING.match(text):
         return True
 
-    # 3. PDF: use font size and boldness.
     if source == "pdf":
         font_size = block.get("font_size")
 
-    # Strong evidence: noticeably larger font.
         if (
             font_size is not None
             and median_font_size is not None
             and font_size >= median_font_size + 2
-            and len(words) <= 12
         ):
-        
             return True
 
-    # Boldness alone is weak evidence.
-    # Don't classify short bold table labels as headings.
-    if (
-        block.get("is_bold")
-        and 2 <= len(words) <= 8
-        and len(text) >= 12
-        and not text.endswith((".", "?", "!", ";", ":"))
-    ):
-        return True
+        if (
+            block.get("is_bold")
+            and 2 <= len(words) <= 8
+            and len(text) >= 12
+            and not text.endswith((".", "?", "!", ";", ":"))
+        ):
+            return True
 
-    # 4. TXT and DOCX without heading styles:
-    # accept short, standalone uppercase headings.
     if source in {"txt", "docx"}:
         if (
             len(words) <= 8
@@ -82,12 +74,11 @@ def _is_heading(
         ):
             return True
 
-    # Otherwise, don't guess.
     return False
 
 
 def split_into_sections(blocks: list[dict]) -> list[dict]:
-    """Group blocks under detected headings."""
+    """Group extracted blocks under detected headings."""
 
     pdf_sizes = [
         block["font_size"]
@@ -100,37 +91,103 @@ def split_into_sections(blocks: list[dict]) -> list[dict]:
 
     sections = []
     current_title = None
-    current_lines = []
+    current_blocks = []
 
     for block in blocks:
-        text = block["text"].strip()
+        text = block.get("text", "").strip()
 
         if not text:
             continue
 
         if _is_heading(block, median_font_size):
-            if current_lines:
+            if current_blocks:
                 sections.append({
                     "section_title": current_title,
-                    "text": "\n".join(current_lines).strip(),
+                    "blocks": current_blocks,
                 })
 
             current_title = text
-            current_lines = [text]
+            current_blocks = [block]
         else:
-            current_lines.append(text)
+            current_blocks.append(block)
 
-    if current_lines:
+    if current_blocks:
         sections.append({
             "section_title": current_title,
-            "text": "\n".join(current_lines).strip(),
+            "blocks": current_blocks,
         })
 
     return [
-        section
-        for section in sections
-        if section["text"]
+        section for section in sections
+        if section["blocks"]
     ]
+
+
+def _split_text(
+    text: str,
+    chunk_size: int,
+    overlap: int,
+) -> list[str]:
+    """Split normal text into overlapping chunks."""
+
+    chunks = []
+    start = 0
+
+    while start < len(text):
+        end = min(start + chunk_size, len(text))
+
+        # Prefer a natural boundary when it is reasonably close.
+        if end < len(text):
+            boundary = max(
+                text.rfind("\n", start, end),
+                text.rfind(" ", start, end),
+            )
+
+            if boundary > start + chunk_size // 2:
+                end = boundary
+
+        content = text[start:end].strip()
+
+        if content:
+            chunks.append(content)
+
+        if end >= len(text):
+            break
+
+        next_start = end - overlap
+
+        # Avoid getting stuck if a boundary creates a tiny chunk.
+        start = max(next_start, start + 1)
+
+    return chunks
+
+
+def _chunk_table_rows(
+    rows: list[str],
+    chunk_size: int,
+) -> list[str]:
+    """Group complete table rows without splitting them unnecessarily."""
+
+    chunks = []
+    current_rows = []
+    current_length = 0
+
+    for row in rows:
+        row_length = len(row)
+
+        if current_rows and current_length + 1 + row_length > chunk_size:
+            chunks.append("\n".join(current_rows))
+            current_rows = []
+            current_length = 0
+
+        # Keep an individual row intact, even if it exceeds chunk_size.
+        current_rows.append(row)
+        current_length += row_length + (1 if len(current_rows) > 1 else 0)
+
+    if current_rows:
+        chunks.append("\n".join(current_rows))
+
+    return chunks
 
 
 def chunk_text(
@@ -138,7 +195,7 @@ def chunk_text(
     chunk_size: int = 1000,
     overlap: int = 150,
 ) -> list[dict]:
-    """Create chunks while preserving section metadata."""
+    """Create section-aware chunks while preserving table rows."""
 
     if chunk_size <= 0:
         raise ValueError("chunk_size must be greater than zero")
@@ -152,22 +209,62 @@ def chunk_text(
     chunks = []
 
     for section in sections:
-        content = section["text"]
-        start = 0
+        section_title = section["section_title"]
+        pending_text = []
 
-        while start < len(content):
-            end = min(start + chunk_size, len(content))
-            chunk_content = content[start:end].strip()
+        def flush_text():
+            if not pending_text:
+                return
 
-            if chunk_content:
+            text = "\n".join(pending_text).strip()
+            pending_text.clear()
+
+            for content in _split_text(text, chunk_size, overlap):
                 chunks.append({
-                    "content": chunk_content,
-                    "section_title": section["section_title"],
+                    "content": content,
+                    "section_title": section_title,
                 })
 
-            if end == len(content):
-                break
+        index = 0
+        section_blocks = section["blocks"]
 
-            start = end - overlap
+        while index < len(section_blocks):
+            block = section_blocks[index]
+
+            if block.get("is_table"):
+                flush_text()
+
+                # Collect consecutive table rows together.
+                table_rows = []
+
+                while (
+                    index < len(section_blocks)
+                    and section_blocks[index].get("is_table")
+                ):
+                    row_text = section_blocks[index]["text"].strip()
+
+                    if row_text:
+                        table_rows.append(row_text)
+
+                    index += 1
+
+                for content in _chunk_table_rows(
+                    table_rows, chunk_size
+                ):
+                    chunks.append({
+                        "content": content,
+                        "section_title": section_title,
+                    })
+
+                continue
+
+            text = block["text"].strip()
+
+            if text:
+                pending_text.append(text)
+
+            index += 1
+
+        flush_text()
 
     return chunks
