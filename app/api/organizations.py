@@ -6,6 +6,8 @@ from app.db.database import get_db
 from app.models.membership import Membership
 from app.models.organization import Organization
 from app.models.user import User
+from app.schemas.rag import AskRequest, AskResponse
+from app.services.rag_service import answer_question
 from app.api.dependencies import get_current_user, require_role
 from app.schemas.organization import (
     OrganizationCreate,
@@ -316,3 +318,38 @@ def remove_organization_member(
     db.commit()
 
     return None
+
+
+
+
+
+@router.post(
+    "/{organization_id}/ask",
+    response_model=AskResponse,
+)
+def ask_organization_documents(
+    organization_id: int,
+    request: AskRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    # 1. Verify organization membership
+    membership = db.scalar(
+        select(Membership).where(
+            Membership.user_id == current_user.id,
+            Membership.organization_id == organization_id,
+        )
+    )
+
+    if membership is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You are not a member of this organization",
+        )
+
+    # 2. Generate the answer using RAG
+    return answer_question(
+        db=db,
+        organization_id=organization_id,
+        question=request.question.strip(),
+    )
