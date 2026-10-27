@@ -2,7 +2,7 @@
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict , Field
 
 
 class ConversationCreate(BaseModel):
@@ -32,3 +32,6 @@ class ChatMessageResponse(BaseModel):
     created_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+class ConversationUpdate(BaseModel):
+    title: str = Field(min_length=1, max_length=255)

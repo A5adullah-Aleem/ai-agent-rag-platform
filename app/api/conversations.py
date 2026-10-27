@@ -12,6 +12,7 @@ from app.models.chat_message import ChatMessage
 from app.schemas.conversation import (
     ConversationCreate,
     ConversationResponse,
+    ConversationUpdate,
     ChatMessageResponse,
     ChatMessageCreate
 )
@@ -243,3 +244,39 @@ def send_message(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to generate or save the AI response",
         )
+
+
+
+@router.patch(
+    "/organizations/{organization_id}/conversations/{conversation_id}",
+    response_model=ConversationResponse,
+)
+def rename_conversation(
+    organization_id: int,
+    conversation_id: int,
+    request: ConversationUpdate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    verify_membership(db, organization_id, current_user.id)
+    conversation = get_user_conversation(
+        db,
+        organization_id,
+        conversation_id,
+        current_user.id,
+    )
+
+    title = request.title.strip()
+
+    if not title:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Conversation title cannot be empty",
+        )
+
+    conversation.title = title[:255]
+
+    db.commit()
+    db.refresh(conversation)
+
+    return conversation
