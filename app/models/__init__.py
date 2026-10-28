@@ -5,6 +5,7 @@ from app.models.document import Document
 from app.models.document_chunk import DocumentChunk
 from app.models.conversation import Conversation
 from app.models.chat_message import ChatMessage
+from app.models.password_reset_token import PasswordResetToken
 
 __all__ = [
     "User",
@@ -14,4 +15,5 @@ __all__ = [
     "DocumentChunk",
     "Conversation",
     "ChatMessage",
+    "PasswordResetToken",
 ]
