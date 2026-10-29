@@ -1,11 +1,12 @@
 
 from functools import lru_cache
 
-from sentence_transformers import SentenceTransformer
+
 
 
 @lru_cache(maxsize=1)
-def get_embedding_model() -> SentenceTransformer:
+def get_embedding_model():
+    from sentence_transformers import SentenceTransformer
     return SentenceTransformer(
         "sentence-transformers/all-MiniLM-L6-v2",
         device="cpu",
@@ -13,6 +14,7 @@ def get_embedding_model() -> SentenceTransformer:
 
 
 def generate_embedding(text: str) -> list[float]:
+    
     model = get_embedding_model()
 
     vector = model.encode(
