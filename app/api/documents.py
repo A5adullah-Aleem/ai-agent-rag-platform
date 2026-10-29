@@ -15,6 +15,7 @@ from app.models.membership import Membership
 from app.services.embedding_service import generate_embedding
 from app.schemas.document import SearchRequest
 from app.services.semantic_search import semantic_search
+from app.services.embedding_service import generate_embeddings
 
 router = APIRouter(prefix="/organizations", tags=["Documents"])
 
@@ -186,6 +187,7 @@ def delete_document(
     
     
     
+
 @router.post("/{organization_id}/documents/{document_id}/process")
 def process_document(
     organization_id: int,
@@ -225,44 +227,58 @@ def process_document(
         if not chunks:
             raise ValueError("No chunks generated from document")
 
-        # 4. Generate embeddings for all chunks
-        chunk_records = []
-
-        for index, chunk in enumerate(chunks):
-            content = chunk["content"]
-            section_title = chunk["section_title"]
-
-            embedding = generate_embedding(content)
-
-            chunk_records.append(
-            DocumentChunk(
-            document_id=document.id,
-            chunk_index=index,
-            content=content,
-            section_title=section_title,
-            embedding=embedding,
-            )
-        )
-
-        # 5. Replace previous chunks
+        # 4. Delete previous chunks before reprocessing
         db.query(DocumentChunk).filter(
             DocumentChunk.document_id == document.id
         ).delete(synchronize_session=False)
 
-        db.add_all(chunk_records)
+        total_chunks = len(chunks)
+        batch_size = 4
+
+        # 5. Generate embeddings and save in small batches
+        for start in range(0, total_chunks, batch_size):
+            batch = chunks[start:start + batch_size]
+
+            texts = [chunk["content"] for chunk in batch]
+            embeddings = generate_embeddings(
+                texts,
+                batch_size=batch_size,
+            )
+
+            chunk_records = []
+
+            for offset, (chunk, embedding) in enumerate(
+                zip(batch, embeddings)
+            ):
+                chunk_records.append(
+                    DocumentChunk(
+                        document_id=document.id,
+                        chunk_index=start + offset,
+                        content=chunk["content"],
+                        section_title=chunk["section_title"],
+                        embedding=embedding,
+                    )
+                )
+
+            db.add_all(chunk_records)
+            db.flush()
+
+            # Release references to this batch
+            del chunk_records, embeddings, texts, batch
 
         # 6. Update document status
         document.status = "processed"
-
         db.commit()
 
         return {
             "message": "Document processed successfully",
             "document_id": document.id,
             "status": document.status,
-            "characters_extracted":  sum(len(block["text"]) for block in blocks),
-            "total_chunks": len(chunks),
-            "embeddings_generated": len(chunk_records),
+            "characters_extracted": sum(
+                len(block["text"]) for block in blocks
+            ),
+            "total_chunks": total_chunks,
+            "embeddings_generated": total_chunks,
         }
 
     except ValueError as exc:
